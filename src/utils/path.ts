@@ -8,6 +8,29 @@ import { promisify } from "util";
 // Promisify exec for cleaner async/await usage
 const exec = promisify(execCallback);
 
+type TimeoutErrorLike = Error & { code?: string };
+
+function timeoutError(ms: number, context: string): TimeoutErrorLike {
+  const err = new Error(`Timed out after ${ms}ms: ${context}`) as TimeoutErrorLike;
+  err.code = 'ETIMEDOUT';
+  return err;
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, context: string): Promise<T> {
+  if (!Number.isFinite(ms) || ms <= 0) return promise;
+
+  let timeoutId: NodeJS.Timeout | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => reject(timeoutError(ms, context)), ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 /**
  * Checks if a path contains any problematic characters or patterns
  * @param vaultPath - The path to validate
@@ -120,7 +143,21 @@ export function checkPathCharacters(vaultPath: string): string | null {
 export async function checkLocalPath(vaultPath: string): Promise<string | null> {
   try {
     // Get real path (resolves symlinks)
-    const realPath = await fs.realpath(vaultPath);
+    const fsTimeoutMs = Number(process.env.OBSIDIAN_MCP_FS_TIMEOUT_MS) || 5000;
+    let realPath: string;
+    try {
+      realPath = await withTimeout(
+        fs.realpath(vaultPath),
+        fsTimeoutMs,
+        `fs.realpath(${vaultPath})`
+      );
+    } catch (error) {
+      const code = (error as TimeoutErrorLike | undefined)?.code;
+      if (code === 'ETIMEDOUT') {
+        return `Timed out while resolving the vault path. The filesystem may be unavailable or extremely slow (e.g. network mount, iCloud/File Provider).`;
+      }
+      throw error;
+    }
     
     // Check if path changed significantly after resolving symlinks
     if (path.dirname(realPath) !== path.dirname(vaultPath)) {

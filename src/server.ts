@@ -15,7 +15,6 @@ import { Tool } from "./types.js";
 import { z } from "zod";
 import path from "path";
 import os from 'os';
-import fs from 'fs';
 import {
   listVaultResources,
   readVaultResource
@@ -50,29 +49,6 @@ export class ObsidianServer {
     vaultConfigs.forEach(config => {
       const expandedPath = expandHome(config.path);
       const resolvedPath = path.resolve(expandedPath);
-      
-      // Check if .obsidian directory exists
-      const obsidianConfigPath = path.join(resolvedPath, '.obsidian');
-      try {
-        const stats = fs.statSync(obsidianConfigPath);
-        if (!stats.isDirectory()) {
-          throw new McpError(
-            ErrorCode.InvalidRequest,
-            `Invalid Obsidian vault at ${config.path}: .obsidian exists but is not a directory`
-          );
-        }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-          throw new McpError(
-            ErrorCode.InvalidRequest,
-            `Invalid Obsidian vault at ${config.path}: Missing .obsidian directory. Please open this folder in Obsidian first to initialize it.`
-          );
-        }
-        throw new McpError(
-          ErrorCode.InvalidRequest,
-          `Error accessing vault at ${config.path}: ${(error as Error).message}`
-        );
-      }
 
       this.vaults.set(config.name, resolvedPath);
     });

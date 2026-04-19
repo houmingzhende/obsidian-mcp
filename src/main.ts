@@ -33,6 +33,29 @@ interface VaultConfig {
 async function main() {
   // Constants
   const MAX_VAULTS = 10; // Reasonable limit to prevent resource issues
+  const FS_TIMEOUT_MS = Number(process.env.OBSIDIAN_MCP_FS_TIMEOUT_MS) || 5000;
+
+  type TimeoutErrorLike = Error & { code?: string };
+  function timeoutError(ms: number, context: string): TimeoutErrorLike {
+    const err = new Error(`Timed out after ${ms}ms: ${context}`) as TimeoutErrorLike;
+    err.code = 'ETIMEDOUT';
+    return err;
+  }
+
+  async function withTimeout<T>(promise: Promise<T>, context: string): Promise<T> {
+    if (!Number.isFinite(FS_TIMEOUT_MS) || FS_TIMEOUT_MS <= 0) return promise;
+
+    let timeoutId: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timeoutId = setTimeout(() => reject(timeoutError(FS_TIMEOUT_MS, context)), FS_TIMEOUT_MS);
+    });
+
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  }
 
   const vaultArgs = process.argv.slice(2);
   if (vaultArgs.length === 0) {
@@ -192,7 +215,7 @@ Examples:
 
       try {
         // Check if path exists and is a directory
-        const stats = await fs.stat(absolutePath);
+        const stats = await withTimeout(fs.stat(absolutePath), `fs.stat(${absolutePath})`);
         if (!stats.isDirectory()) {
           const errorMessage = `Vault path must be a directory: ${vaultPath}`;
           console.error(`Error: ${errorMessage}`);
@@ -210,7 +233,10 @@ Examples:
         }
 
         // Check if path is readable and writable
-        await fs.access(absolutePath, fsConstants.R_OK | fsConstants.W_OK);
+        await withTimeout(
+          fs.access(absolutePath, fsConstants.R_OK | fsConstants.W_OK),
+          `fs.access(RW ${absolutePath})`
+        );
 
         // Check if this is a valid Obsidian vault
         const obsidianConfigPath = path.join(absolutePath, '.obsidian');
@@ -218,7 +244,7 @@ Examples:
         
         try {
           // Check .obsidian directory
-          const configStats = await fs.stat(obsidianConfigPath);
+          const configStats = await withTimeout(fs.stat(obsidianConfigPath), `fs.stat(${obsidianConfigPath})`);
           if (!configStats.isDirectory()) {
             const errorMessage = `Invalid Obsidian vault configuration in ${vaultPath}\n` +
               `The .obsidian folder exists but is not a directory\n` +
@@ -239,7 +265,10 @@ Examples:
           }
 
           // Check app.json to verify it's properly initialized
-          await fs.access(obsidianAppConfigPath, fsConstants.R_OK);
+          await withTimeout(
+            fs.access(obsidianAppConfigPath, fsConstants.R_OK),
+            `fs.access(R ${obsidianAppConfigPath})`
+          );
           
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -281,6 +310,11 @@ Examples:
         return absolutePath;
       } catch (error) {
         let errorMessage: string;
+        if ((error as TimeoutErrorLike | undefined)?.code === 'ETIMEDOUT') {
+          errorMessage = `Vault path check timed out (>${FS_TIMEOUT_MS}ms): ${vaultPath}\n` +
+            `This usually means the filesystem is unavailable or extremely slow (e.g. network mount, iCloud/File Provider, broken /Volumes mount).\n` +
+            `Try moving the vault to a fully local path (e.g. ~/Documents/Obsidian/...), or increase the timeout via OBSIDIAN_MCP_FS_TIMEOUT_MS.`;
+        } else 
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
           errorMessage = `Vault directory does not exist: ${vaultPath}`;
         } else if ((error as NodeJS.ErrnoException).code === 'EACCES') {
@@ -447,7 +481,7 @@ Examples:
     }
 
     console.error(`Starting Obsidian MCP Server with ${uniqueVaults.length} vault${uniqueVaults.length > 1 ? 's' : ''}...`);
-    
+
     const server = new ObsidianServer(uniqueVaults);
     console.error("Server initialized successfully");
 
@@ -471,6 +505,11 @@ Examples:
     // Register signal handlers
     process.on('SIGINT', () => shutdown('SIGINT')); // Ctrl+C
     process.on('SIGTERM', () => shutdown('SIGTERM')); // Kill command
+
+    // If the client disconnects, stdin will close/end. Exit cleanly to avoid zombie MCP processes.
+    process.stdin.on('end', () => shutdown('stdin_end'));
+    process.stdin.on('close', () => shutdown('stdin_close'));
+    process.on('SIGPIPE', () => shutdown('SIGPIPE'));
 
     // Create vaults Map from unique vaults
     const vaultsMap = new Map(uniqueVaults.map(v => [v.name, v.path]));
@@ -506,7 +545,8 @@ Examples:
     // Start the server without logging to stdout
     await server.start();
   } catch (error) {
-    console.log(error instanceof Error ? error.message : String(error));
+    // IMPORTANT: Never log to stdout for stdio MCP servers (stdout is reserved for JSON-RPC)
+    console.error(error instanceof Error ? error.message : String(error));
     // Format error for MCP protocol
     const mcpError = error instanceof McpError ? error : new McpError(
       ErrorCode.InternalError,
