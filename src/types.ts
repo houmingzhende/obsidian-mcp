@@ -125,3 +125,24 @@ export interface PromptResult {
     [key: string]: any;
   };
 }
+
+/**
+ * Standardized tool result interface for P0-4
+ * All tools should return this structure for agent consumption
+ */
+export interface ToolResult {
+  /** Whether the operation succeeded */
+  success: boolean;
+  /** Human-readable message describing the result */
+  message: string;
+  /** The file path that was operated on */
+  path?: string;
+  /** The operation that was performed */
+  operation?: string;
+  /** Whether the operation made any changes */
+  changed?: boolean;
+  /** Any warnings generated during the operation */
+  warnings?: string[];
+  /** Additional structured details about the operation */
+  details?: Record<string, any>;
+}

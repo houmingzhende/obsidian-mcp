@@ -11,6 +11,19 @@ import { createAddTagsTool } from "./tools/add-tags/index.js";
 import { createRemoveTagsTool } from "./tools/remove-tags/index.js";
 import { createRenameTagTool } from "./tools/rename-tag/index.js";
 import { createReadNoteTool } from "./tools/read-note/index.js";
+// P0-1: Frontmatter tools
+import { createReadFrontmatterTool } from "./tools/read-frontmatter/index.js";
+import { createUpdateFrontmatterTool } from "./tools/update-frontmatter/index.js";
+import { createMergeFrontmatterTool } from "./tools/merge-frontmatter/index.js";
+import { createRemoveFrontmatterKeysTool } from "./tools/remove-frontmatter-keys/index.js";
+// P0-2: Local editing tools
+import { createPatchNoteTool } from "./tools/patch-note/index.js";
+import { createReplaceNoteSectionTool } from "./tools/replace-note-section/index.js";
+import { createInsertNoteContentTool } from "./tools/insert-note-content/index.js";
+// P0-3: Directory and heading listing tools
+import { createListDirectoryTool } from "./tools/list-directory/index.js";
+import { createListNotesTool } from "./tools/list-notes/index.js";
+import { createListNoteHeadingsTool } from "./tools/list-note-headings/index.js";
 import { listVaultsPrompt } from "./prompts/list-vaults/index.js";
 import { registerPrompt } from "./utils/prompt-factory.js";
 import path from "path";
@@ -526,7 +539,20 @@ Examples:
       createAddTagsTool(vaultsMap),
       createRemoveTagsTool(vaultsMap),
       createRenameTagTool(vaultsMap),
-      createReadNoteTool(vaultsMap)
+      createReadNoteTool(vaultsMap),
+      // P0-1: Frontmatter tools
+      createReadFrontmatterTool(vaultsMap),
+      createUpdateFrontmatterTool(vaultsMap),
+      createMergeFrontmatterTool(vaultsMap),
+      createRemoveFrontmatterKeysTool(vaultsMap),
+      // P0-2: Local editing tools
+      createPatchNoteTool(vaultsMap),
+      createReplaceNoteSectionTool(vaultsMap),
+      createInsertNoteContentTool(vaultsMap),
+      // P0-3: Directory and heading listing tools
+      createListDirectoryTool(vaultsMap),
+      createListNotesTool(vaultsMap),
+      createListNoteHeadingsTool(vaultsMap)
     ];
 
     for (const tool of tools) {
