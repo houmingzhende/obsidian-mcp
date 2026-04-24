@@ -1,6 +1,6 @@
 {
   "name": "obsidian-mcp",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "MCP server for AI assistants to interact with Obsidian vaults",
   "type": "module",
   "main": "build/main.js",
