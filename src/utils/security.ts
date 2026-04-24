@@ -49,6 +49,7 @@ export class ConnectionMonitor {
   private lastActivity: number = Date.now();
   private healthCheckInterval: NodeJS.Timeout | null = null;
   private heartbeatInterval: NodeJS.Timeout | null = null;
+  private graceTimeout: NodeJS.Timeout | null = null;
   private readonly timeout: number;
   private readonly gracePeriod: number;
   private readonly heartbeat: number;
@@ -71,7 +72,7 @@ export class ConnectionMonitor {
 
   start(onTimeout: () => void) {
     // Start monitoring after grace period
-    setTimeout(() => {
+    this.graceTimeout = setTimeout(() => {
       this.initialized = true;
 
       // Set up heartbeat to keep connection alive
@@ -93,6 +94,11 @@ export class ConnectionMonitor {
   }
 
   stop() {
+    if (this.graceTimeout) {
+      clearTimeout(this.graceTimeout);
+      this.graceTimeout = null;
+    }
+
     if (this.healthCheckInterval) {
       clearInterval(this.healthCheckInterval);
       this.healthCheckInterval = null;

@@ -1,5 +1,8 @@
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { createServer as createHttpServer, type IncomingMessage, type Server as NodeHttpServer } from "node:http";
+import { randomUUID } from "node:crypto";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -36,6 +39,9 @@ export class ObsidianServer {
   private vaults: Map<string, string> = new Map();
   private rateLimiter: RateLimiter;
   private connectionMonitor: ConnectionMonitor;
+
+  private httpServer?: NodeHttpServer;
+  private httpTransport?: StreamableHTTPServerTransport;
 
   constructor(vaultConfigs: { name: string; path: string }[]) {
     if (!vaultConfigs || vaultConfigs.length === 0) {
@@ -77,7 +83,17 @@ export class ObsidianServer {
 
     // Setup connection monitoring with grace period for initialization
     this.connectionMonitor.start(() => {
-      this.server.close();
+      console.error("Connection monitor timeout: shutting down server");
+      
+      // Force exit if graceful shutdown hangs
+      setTimeout(() => {
+        console.error("Graceful shutdown timed out, forcing exit...");
+        process.exit(1);
+      }, 3000).unref();
+      
+      this.stop().catch(console.error).finally(() => {
+        process.exit(0);
+      });
     });
     
     // Update activity during initialization
@@ -246,8 +262,150 @@ export class ObsidianServer {
     console.error("Obsidian MCP Server running on stdio");
   }
 
+  async startHttp(options: {
+    host: string;
+    port: number;
+    path?: string;
+    token: string;
+    corsOrigin?: string;
+    enableJsonResponse?: boolean;
+  }) {
+    const pathPrefix = (options.path ?? "/mcp").replace(/\/+$/, "") || "/mcp";
+
+    if (!options.token || typeof options.token !== 'string') {
+      throw new McpError(ErrorCode.InvalidRequest, "HTTP/SSE enabled but no token provided (OBSIDIAN_MCP_HTTP_TOKEN)");
+    }
+
+    if (this.httpServer) {
+      throw new McpError(ErrorCode.InvalidRequest, "HTTP server already started");
+    }
+
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+      enableJsonResponse: options.enableJsonResponse ?? false
+    });
+    this.httpTransport = transport;
+    await this.server.connect(transport);
+
+    const setCorsHeaders = (res: any) => {
+      if (!options.corsOrigin) return;
+      res.setHeader("Access-Control-Allow-Origin", options.corsOrigin);
+      res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+      res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization,MCP-Protocol-Version");
+      res.setHeader("Access-Control-Max-Age", "600");
+    };
+
+    const isAuthed = (req: IncomingMessage): boolean => {
+      const header = req.headers['authorization'];
+      if (!header || Array.isArray(header)) return false;
+      const expected = `Bearer ${options.token}`;
+      return header.trim() === expected;
+    };
+
+    const readJsonBody = async (req: IncomingMessage, maxBytes: number): Promise<unknown> => {
+      const chunks: Buffer[] = [];
+      let total = 0;
+      for await (const chunk of req) {
+        const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        total += buf.length;
+        if (total > maxBytes) {
+          throw new McpError(ErrorCode.InvalidRequest, `Request body too large (>${maxBytes} bytes)`);
+        }
+        chunks.push(buf);
+      }
+      if (chunks.length === 0) return undefined;
+      const text = Buffer.concat(chunks).toString('utf8');
+      if (!text) return undefined;
+      try {
+        return JSON.parse(text);
+      } catch {
+        throw new McpError(ErrorCode.ParseError, "Invalid JSON body");
+      }
+    };
+
+    this.httpServer = createHttpServer(async (req, res) => {
+      try {
+        const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
+        const pathname = url.pathname.replace(/\/+$/, '') || '/';
+
+        // CORS preflight
+        if (req.method === 'OPTIONS') {
+          setCorsHeaders(res);
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
+
+        // Unauthed health check can be helpful for local ops
+        if (req.method === 'GET' && pathname === '/health') {
+          setCorsHeaders(res);
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+
+        if (!isAuthed(req)) {
+          setCorsHeaders(res);
+          res.statusCode = 401;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ error: 'Unauthorized' }));
+          return;
+        }
+
+        if (pathname !== pathPrefix) {
+          setCorsHeaders(res);
+          res.statusCode = 404;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ error: 'Not Found' }));
+          return;
+        }
+
+        setCorsHeaders(res);
+        let parsedBody: unknown = undefined;
+        if (req.method === 'POST') {
+          parsedBody = await readJsonBody(req, 5 * 1024 * 1024);
+        }
+
+        await transport.handleRequest(req as IncomingMessage & { auth?: any }, res, parsedBody);
+      } catch (error) {
+        // Avoid stdout; keep errors on stderr.
+        console.error("HTTP transport error:", error);
+        if (!res.headersSent) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ error: error instanceof Error ? error.message : String(error) }));
+        }
+      }
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      this.httpServer!.once('error', reject);
+      this.httpServer!.listen(options.port, options.host, () => resolve());
+    });
+
+    console.error(`Obsidian MCP HTTP/SSE listening on http://${options.host}:${options.port}${pathPrefix}`);
+  }
+
   async stop() {
     this.connectionMonitor.stop();
+
+    if (this.httpServer) {
+      const srv = this.httpServer;
+      this.httpServer = undefined;
+      await new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+
+    if (this.httpTransport) {
+      const t = this.httpTransport;
+      this.httpTransport = undefined;
+      try {
+        await t.close();
+      } catch (e) {
+        console.error("Error closing HTTP transport:", e);
+      }
+    }
+
     await this.server.close();
     console.error("Obsidian MCP Server stopped");
   }

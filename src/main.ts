@@ -495,7 +495,26 @@ Examples:
 
     console.error(`Starting Obsidian MCP Server with ${uniqueVaults.length} vault${uniqueVaults.length > 1 ? 's' : ''}...`);
 
-    const server = new ObsidianServer(uniqueVaults);
+    const stdioServer = new ObsidianServer(uniqueVaults);
+
+    const enableHttp = (() => {
+      const v = (process.env.OBSIDIAN_MCP_HTTP_ENABLE ?? '').toLowerCase().trim();
+      return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+    })();
+
+    const httpHost = process.env.OBSIDIAN_MCP_HTTP_HOST || '127.0.0.1';
+    const httpPort = Number(process.env.OBSIDIAN_MCP_HTTP_PORT || '27123');
+    const httpPath = process.env.OBSIDIAN_MCP_HTTP_PATH || '/mcp';
+    const httpToken = process.env.OBSIDIAN_MCP_HTTP_TOKEN || '';
+    const httpCorsOrigin = process.env.OBSIDIAN_MCP_HTTP_CORS_ORIGIN || '';
+    const httpEnableJsonResponse = (() => {
+      const v = (process.env.OBSIDIAN_MCP_HTTP_ENABLE_JSON ?? '').toLowerCase().trim();
+      return v === '1' || v === 'true' || v === 'yes' || v === 'on';
+    })();
+
+    const httpServer = enableHttp ? new ObsidianServer(uniqueVaults) : undefined;
+    let httpStarted = false;
+
     console.error("Server initialized successfully");
 
     // Handle graceful shutdown
@@ -505,13 +524,23 @@ Examples:
       isShuttingDown = true;
 
       console.error(`\nReceived ${signal}, shutting down...`);
+      
+      // Force exit after 3 seconds if graceful shutdown hangs
+      setTimeout(() => {
+        console.error("Graceful shutdown timed out, forcing exit...");
+        process.exit(1);
+      }, 3000).unref();
+
       try {
-        await server.stop();
+        if (httpServer) {
+          await httpServer.stop();
+        }
+        await stdioServer.stop();
         console.error("Server stopped cleanly");
-        process.exit(0);
       } catch (error) {
         console.error("Error during shutdown:", error);
-        process.exit(1);
+      } finally {
+        process.exit(0);
       }
     }
 
@@ -520,8 +549,29 @@ Examples:
     process.on('SIGTERM', () => shutdown('SIGTERM')); // Kill command
 
     // If the client disconnects, stdin will close/end. Exit cleanly to avoid zombie MCP processes.
-    process.stdin.on('end', () => shutdown('stdin_end'));
-    process.stdin.on('close', () => shutdown('stdin_close'));
+    process.stdin.on('end', async () => {
+      if (httpStarted) {
+        // If HTTP/SSE is running, keep process alive and only stop stdio transport.
+        try {
+          await stdioServer.stop();
+        } catch (e) {
+          console.error('Error stopping stdio server after stdin_end:', e);
+        }
+        return;
+      }
+      void shutdown('stdin_end');
+    });
+    process.stdin.on('close', async () => {
+      if (httpStarted) {
+        try {
+          await stdioServer.stop();
+        } catch (e) {
+          console.error('Error stopping stdio server after stdin_close:', e);
+        }
+        return;
+      }
+      void shutdown('stdin_close');
+    });
     process.on('SIGPIPE', () => shutdown('SIGPIPE'));
 
     // Create vaults Map from unique vaults
@@ -557,7 +607,8 @@ Examples:
 
     for (const tool of tools) {
       try {
-        server.registerTool(tool);
+        stdioServer.registerTool(tool);
+        if (httpServer) httpServer.registerTool(tool);
       } catch (error) {
         console.error(`Error registering tool ${tool.name}:`, error);
         throw error;
@@ -569,7 +620,25 @@ Examples:
     console.error("Server starting...\n");
 
     // Start the server without logging to stdout
-    await server.start();
+    await stdioServer.start();
+
+    if (httpServer) {
+      if (!Number.isFinite(httpPort) || httpPort <= 0) {
+        console.error(`HTTP/SSE disabled: invalid OBSIDIAN_MCP_HTTP_PORT (${process.env.OBSIDIAN_MCP_HTTP_PORT})`);
+      } else if (!httpToken) {
+        console.error('HTTP/SSE disabled: missing OBSIDIAN_MCP_HTTP_TOKEN');
+      } else {
+        await httpServer.startHttp({
+          host: httpHost,
+          port: httpPort,
+          path: httpPath,
+          token: httpToken,
+          corsOrigin: httpCorsOrigin || undefined,
+          enableJsonResponse: httpEnableJsonResponse
+        });
+        httpStarted = true;
+      }
+    }
   } catch (error) {
     // IMPORTANT: Never log to stdout for stdio MCP servers (stdout is reserved for JSON-RPC)
     console.error(error instanceof Error ? error.message : String(error));

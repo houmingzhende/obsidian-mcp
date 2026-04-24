@@ -7,11 +7,20 @@ const prompts = new Map<string, Prompt>();
  * Register a prompt for use in the MCP server
  */
 export function registerPrompt(prompt: Prompt): void {
-  if (prompts.has(prompt.name)) {
-    throw new McpError(
-      ErrorCode.InvalidRequest,
-      `Prompt "${prompt.name}" is already registered`
-    );
+  const existing = prompts.get(prompt.name);
+  if (existing) {
+    // Allow idempotent registration (useful when hosting multiple transports/servers in one process).
+    // Still fail fast if a different prompt tries to reuse the same name.
+    const same =
+      existing.description === prompt.description &&
+      existing.handler === prompt.handler;
+    if (!same) {
+      throw new McpError(
+        ErrorCode.InvalidRequest,
+        `Prompt "${prompt.name}" is already registered with different implementation`
+      );
+    }
+    return;
   }
   prompts.set(prompt.name, prompt);
 }
